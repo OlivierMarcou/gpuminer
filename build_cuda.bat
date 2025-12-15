@@ -29,6 +29,44 @@ echo.
 REM Vérifier Visual Studio (cl.exe)
 echo [2/4] Verification de Visual Studio...
 where cl >nul 2>&1
+if %ERRORLEVEL% NEQ 0 (
+    echo ATTENTION: cl.exe non trouve dans le PATH
+    echo Recherche de Visual Studio...
+    
+    REM Chercher vcvarsall.bat
+    set "VCVARS="
+    
+    if exist "C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Auxiliary\Build\vcvarsall.bat" (
+        set "VCVARS=C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Auxiliary\Build\vcvarsall.bat"
+    )
+    if exist "C:\Program Files\Microsoft Visual Studio\2022\Professional\VC\Auxiliary\Build\vcvarsall.bat" (
+        set "VCVARS=C:\Program Files\Microsoft Visual Studio\2022\Professional\VC\Auxiliary\Build\vcvarsall.bat"
+    )
+    if exist "C:\Program Files (x86)\Microsoft Visual Studio\2019\Community\VC\Auxiliary\Build\vcvarsall.bat" (
+        set "VCVARS=C:\Program Files (x86)\Microsoft Visual Studio\2019\Community\VC\Auxiliary\Build\vcvarsall.bat"
+    )
+    
+    if defined VCVARS (
+        echo Visual Studio trouve: %VCVARS%
+        echo Configuration de l'environnement...
+        call "%VCVARS%" x64
+        echo.
+    ) else (
+        echo ERREUR: Visual Studio non trouve!
+        echo.
+        echo Installez Visual Studio Community (gratuit):
+        echo https://visualstudio.microsoft.com/downloads/
+        echo.
+        echo Cochez: "Developpement Desktop avec C++"
+        echo.
+        pause
+        exit /b 1
+    )
+) else (
+    echo OK: Visual Studio detecte
+    echo.
+)
+
 REM Nettoyer les anciens fichiers
 echo [3/4] Nettoyage...
 if exist *.obj del /Q *.obj
@@ -81,67 +119,6 @@ if %ERRORLEVEL% NEQ 0 (
 echo OK
 echo.
 
-echo Compilation Equihash kernel...
-nvcc -O3 -arch=sm_50 ^
-     -gencode=arch=compute_50,code=sm_50 ^
-     -gencode=arch=compute_60,code=sm_60 ^
-     -gencode=arch=compute_70,code=sm_70 ^
-     -gencode=arch=compute_75,code=sm_75 ^
-     -gencode=arch=compute_80,code=sm_80 ^
-     -gencode=arch=compute_86,code=sm_86 ^
-     -gencode=arch=compute_89,code=sm_89 ^
-     --ptxas-options=-v ^
-     -c equihash.cu -o equihash.obj
-
-if %ERRORLEVEL% NEQ 0 (
-    echo ERREUR compilation Equihash!
-    pause
-    exit /b 1
-)
-echo OK
-echo.
-
-echo Compilation Equihash 192,7 kernel (Zcash)...
-nvcc -O3 -arch=sm_50 ^
-     -gencode=arch=compute_50,code=sm_50 ^
-     -gencode=arch=compute_60,code=sm_60 ^
-     -gencode=arch=compute_70,code=sm_70 ^
-     -gencode=arch=compute_75,code=sm_75 ^
-     -gencode=arch=compute_80,code=sm_80 ^
-     -gencode=arch=compute_86,code=sm_86 ^
-     -gencode=arch=compute_89,code=sm_89 ^
-     -c equihash_192_7.cu -o equihash_192_7.obj
-
-if %ERRORLEVEL% NEQ 0 (
-    echo ERREUR compilation Equihash 192,7!
-    pause
-    exit /b 1
-)
-echo OK
-echo.
-
-echo Compilation Stratum client...
-nvcc -O3 -c stratum.c -o stratum.obj
-
-if %ERRORLEVEL% NEQ 0 (
-    echo ERREUR compilation Stratum!
-    pause
-    exit /b 1
-)
-echo OK
-echo.
-
-echo Compilation cJSON...
-nvcc -O3 -c cJSON.c -o cJSON.obj
-
-if %ERRORLEVEL% NEQ 0 (
-    echo ERREUR compilation cJSON!
-    pause
-    exit /b 1
-)
-echo OK
-echo.
-
 echo Compilation programme principal...
 nvcc -O3 -arch=sm_50 ^
      -gencode=arch=compute_50,code=sm_50 ^
@@ -163,7 +140,7 @@ echo OK
 echo.
 
 echo Linkage final...
-nvcc -O3 -o cuda_miner.exe cuda_miner.obj sha256.obj ethash.obj equihash.obj equihash_192_7.obj stratum.obj cJSON.obj -lws2_32
+nvcc -O3 -o cuda_miner.exe cuda_miner.obj sha256.obj ethash.obj stratum.obj cJSON.obj -lws2_32
 
 if %ERRORLEVEL% NEQ 0 (
     echo ERREUR linkage!

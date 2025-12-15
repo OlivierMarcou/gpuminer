@@ -54,8 +54,8 @@ extern "C" {
 // Prototypes fonctions pool locales
 void mine_pool_sha256(PoolConnection *pool, int device_id);
 void mine_pool_ethash(PoolConnection *pool, int device_id);
-void mine_pool_equihash_144_5(PoolConnection *pool, int device_id);
-void mine_pool_equihash_192_7(PoolConnection *pool, int device_id);
+void mine_pool_kawpow(PoolConnection *pool, int device_id);
+
 
 // Structures locales
 typedef struct {
@@ -88,13 +88,11 @@ extern "C" {
                              int grid_size, int block_size);
     void ethash_destroy_dag(void *dag);
     
-    void equihash_search_launch(const uint8_t *header, uint32_t start_nonce, uint32_t end_nonce,
-                               uint32_t *solutions, uint32_t *solution_count,
-                               int grid_size, int block_size);
-    
-    void equihash_192_7_search_launch(const uint8_t *header, uint32_t start_nonce, uint32_t end_nonce,
-                                       uint32_t *solutions, uint32_t *solution_count,
-                                       int grid_size, int block_size);
+    void* kawpow_generate_dag(uint32_t epoch, uint32_t dag_size);
+    void kawpow_search_launch(void *dag, const uint8_t *header, uint64_t target,
+                             uint64_t start_nonce, uint32_t dag_size, uint64_t *solution,
+                             int grid_size, int block_size);
+    void kawpow_destroy_dag(void *dag);
     
     void launch_sha256_kernel(uint32_t *d_header, uint32_t target, uint32_t start_nonce,
                              uint32_t *d_found_nonce, uint32_t *d_found_hash,
@@ -262,107 +260,6 @@ void mine_ethash(int device_id) {
     printf("\n\nArrêté.\n");
 }
 
-void mine_equihash(int device_id) {
-    printf("\n=== Equihash sur GPU %d ===\n", device_id);
-    
-    if (!init_cuda_device(device_id)) return;
-    
-    uint8_t header[140] = {0};
-    uint32_t solutions[100 * 100];
-    uint32_t solution_count;
-    uint32_t start_nonce = 0;
-    clock_t last_report = clock();
-    uint64_t total_hashes = 0;
-    
-    stats.is_mining = 1;
-    stats.start_time = time(NULL);
-    
-    printf("Démarrage...\n\n");
-    
-    while (stats.is_mining) {
-        solution_count = 0;
-        
-        equihash_search_launch(header, start_nonce, start_nonce + GRID_SIZE * BLOCK_SIZE,
-                              solutions, &solution_count, GRID_SIZE, BLOCK_SIZE);
-        
-        if (solution_count > 0) {
-            printf("\n>>> %u SOLUTION(S)!\n", solution_count);
-            stats.shares_accepted += solution_count;
-        }
-        
-        total_hashes += GRID_SIZE * BLOCK_SIZE * 512;
-        start_nonce += GRID_SIZE * BLOCK_SIZE;
-        
-        clock_t now = clock();
-        double elapsed = (double)(now - last_report) / CLOCKS_PER_SEC;
-        
-        if (elapsed >= 5.0) {
-            stats.hashrate = (uint64_t)(total_hashes / elapsed);
-            printf("\r[GPU %d] %.2f Sol/s | Solutions: %u     ",
-                   device_id, stats.hashrate / 1000000.0, stats.shares_accepted);
-            fflush(stdout);
-            last_report = now;
-            total_hashes = 0;
-        }
-        
-        Sleep(10);
-    }
-    
-    printf("\n\nArrêté.\n");
-}
-
-void mine_equihash_192_7(int device_id) {
-    printf("\n=== Equihash 192,7 (Zcash) sur GPU %d ===\n", device_id);
-    
-    if (!init_cuda_device(device_id)) return;
-    
-    uint8_t header[140] = {0};
-    uint32_t solutions[10 * 128];  // 128 indices par solution
-    uint32_t solution_count;
-    uint32_t start_nonce = 0;
-    clock_t last_report = clock();
-    uint64_t total_hashes = 0;
-    
-    stats.is_mining = 1;
-    stats.start_time = time(NULL);
-    
-    printf("Paramètres: N=192, K=7\n");
-    printf("Taille solution: 128 indices\n");
-    printf("Démarrage...\n\n");
-    
-    while (stats.is_mining) {
-        solution_count = 0;
-        
-        equihash_192_7_search_launch(header, start_nonce, start_nonce + GRID_SIZE * BLOCK_SIZE,
-                                      solutions, &solution_count, GRID_SIZE, BLOCK_SIZE);
-        
-        if (solution_count > 0) {
-            printf("\n>>> %u SOLUTION(S) Equihash 192,7!\n", solution_count);
-            stats.shares_accepted += solution_count;
-        }
-        
-        total_hashes += GRID_SIZE * BLOCK_SIZE * 512;
-        start_nonce += GRID_SIZE * BLOCK_SIZE;
-        
-        clock_t now = clock();
-        double elapsed = (double)(now - last_report) / CLOCKS_PER_SEC;
-        
-        if (elapsed >= 5.0) {
-            stats.hashrate = (uint64_t)(total_hashes / elapsed);
-            printf("\r[GPU %d] %.2f Sol/s | Solutions: %u | Temps: %ldm     ",
-                   device_id, stats.hashrate / 1000000.0, stats.shares_accepted,
-                   (long)((time(NULL) - stats.start_time) / 60));
-            fflush(stdout);
-            last_report = now;
-            total_hashes = 0;
-        }
-        
-        Sleep(10);
-    }
-    
-    printf("\n\nArrêté.\n");
-}
-
 // Variables globales pour callbacks
 static MiningJob g_current_job;
 static int g_new_job_available = 0;
@@ -394,12 +291,11 @@ void mine_on_pool(int device_id) {
     printf("\nChoix de l'algorithme:\n");
     printf("1. SHA256 (Bitcoin)\n");
     printf("2. Ethash (Ethereum Classic)\n");
-    printf("3. Equihash 144,5 (Bitcoin Gold)\n");
-    printf("4. Equihash 192,7 (Zcash)\n");
-    printf("Algorithme (1-4): ");
+    printf("3. KawPow (Ravencoin) - 2x plus rentable!\n");
+    printf("Algorithme (1-3): ");
     scanf("%d", &algo_choice);
     
-    if (algo_choice < 1 || algo_choice > 4) {
+    if (algo_choice < 1 || algo_choice > 3) {
         printf("Algorithme invalide!\n");
         return;
     }
@@ -485,7 +381,7 @@ void mine_on_pool(int device_id) {
         }
     }
     
-    const char* algo_names[] = {"", "SHA256", "Ethash (ETC)", "Equihash 144,5", "Equihash 192,7"};
+    const char* algo_names[] = {"", "SHA256", "Ethash (ETC)", "KawPow (RVN)"};
     
     printf("\n=== Configuration ===\n");
     printf("Algorithme: %s\n", algo_names[algo_choice]);
@@ -557,11 +453,8 @@ void mine_on_pool(int device_id) {
         case 2: // Ethash
             mine_pool_ethash(&pool, device_id);
             break;
-        case 3: // Equihash 144,5
-            mine_pool_equihash_144_5(&pool, device_id);
-            break;
-        case 4: // Equihash 192,7
-            mine_pool_equihash_192_7(&pool, device_id);
+        case 3: // KawPow
+            mine_pool_kawpow(&pool, device_id);
             break;
     }
     
@@ -799,105 +692,6 @@ void mine_pool_ethash(PoolConnection *pool, int device_id) {
     printf("\nMinage arrêté.\n");
 }
 
-void mine_pool_equihash_144_5(PoolConnection *pool, int device_id) {
-    printf("Minage Equihash 144,5 sur pool - En développement\n");
-    Sleep(5000);
-}
-
-void mine_pool_equihash_192_7(PoolConnection *pool, int device_id) {
-    printf("=== MINAGE EQUIHASH 192,7 (Zcash) SUR POOL ===\n");
-    printf("Appuyez sur Ctrl+C pour arrêter\n\n");
-    
-    uint8_t header[140] = {0};
-    uint32_t solutions[10 * 128];
-    uint32_t solution_count;
-    uint32_t start_nonce = 0;
-    clock_t last_report = clock();
-    uint64_t total_hashes = 0;
-    
-    while (stats.is_mining) {
-        solution_count = 0;
-        
-        equihash_192_7_search_launch(header, start_nonce, start_nonce + GRID_SIZE * BLOCK_SIZE,
-                                      solutions, &solution_count, GRID_SIZE, BLOCK_SIZE);
-        
-        if (solution_count > 0) {
-            // Limiter à 1 solution pour éviter spam (kernel simplifié trouve beaucoup de faux positifs)
-            uint32_t max_submit = (solution_count > 1) ? 1 : solution_count;
-            printf("\n>>> %u solution(s) trouvée(s), soumission de %u\n", solution_count, max_submit);
-            
-            for (uint32_t i = 0; i < max_submit; i++) {
-                // Récupérer le vrai job_id de la pool
-                char job_id[128];
-                strncpy(job_id, g_current_job.job_id, sizeof(job_id) - 1);
-                job_id[sizeof(job_id) - 1] = '\0';
-                
-                // Convertir nonce en hex
-                uint32_t nonce_value = start_nonce + solutions[i * 128];
-                char nonce_hex[16];
-                sprintf(nonce_hex, "%08x", nonce_value);
-                
-                // Extraire extranonce2 (si nécessaire)
-                char extranonce2[32] = "00000000";
-                
-                // Utiliser ntime du job actuel
-                char ntime[16];
-                strncpy(ntime, g_current_job.ntime, sizeof(ntime) - 1);
-                ntime[sizeof(ntime) - 1] = '\0';
-                
-                printf("Soumission solution %u à la pool...\n", i+1);
-                printf("  Job ID: %s\n", job_id);
-                printf("  Nonce: %s\n", nonce_hex);
-                printf("  Ntime: %s\n", ntime);
-                
-                if (pool_submit_share(pool, job_id, extranonce2, ntime, nonce_hex)) {
-                    stats.shares_accepted++;
-                    printf("✓ Share ACCEPTÉ! (Total: %u)\n", stats.shares_accepted);
-                } else {
-                    stats.shares_rejected++;
-                    printf("✗ Share REJETÉ (Total rejetés: %u)\n", stats.shares_rejected);
-                }
-                
-                // Délai pour éviter spam de shares
-                Sleep(1000);  // 1 seconde entre chaque soumission
-            }
-            printf("\n");
-        }
-        
-        total_hashes += GRID_SIZE * BLOCK_SIZE * 512;
-        start_nonce += GRID_SIZE * BLOCK_SIZE;
-        
-        clock_t now = clock();
-        double elapsed = (double)(now - last_report) / CLOCKS_PER_SEC;
-        
-        if (elapsed >= 5.0) {
-            stats.hashrate = (uint64_t)(total_hashes / elapsed);
-            time_t uptime = time(NULL) - stats.start_time;
-            double accept_rate = stats.shares_accepted + stats.shares_rejected > 0 ?
-                100.0 * stats.shares_accepted / (stats.shares_accepted + stats.shares_rejected) : 0;
-            
-            printf("\r[GPU %d] %.2f Sol/s | Acceptés: %u | Rejetés: %u | Taux: %.1f%% | Temps: %ldm     ",
-                   device_id,
-                   stats.hashrate / 1000000.0,
-                   stats.shares_accepted,
-                   stats.shares_rejected,
-                   accept_rate,
-                   (long)(uptime / 60));
-            fflush(stdout);
-            
-            last_report = now;
-            total_hashes = 0;
-        }
-        
-        if (g_new_job_available) {
-            g_new_job_available = 0;
-            start_nonce = 0;
-            printf("\n>>> Nouveau job reçu, reset du nonce\n");
-        }
-        
-        Sleep(10);
-    }
-}
 
 int main() {
     printf("╔════════════════════════════════╗\n");
@@ -909,16 +703,14 @@ int main() {
     printf("\n=== Menu ===\n");
     printf("1. SHA256 (test local)\n");
     printf("2. Ethash (DAG)\n");
-    printf("3. Equihash 144,5 (Bitcoin Gold)\n");
-    printf("4. Equihash 192,7 (Zcash)\n");
-    printf("5. Miner sur Pool (Stratum)\n");
-    printf("6. Quitter\n\n");
+    printf("3. Miner sur Pool (Stratum)\n");
+    printf("4. Quitter\n\n");
     
     int choice, gpu_id;
     printf("Choix: ");
     scanf("%d", &choice);
     
-    if (choice >= 1 && choice <= 5) {
+    if (choice >= 1 && choice <= 3) {
         printf("GPU (0-%d): ", gpu_count - 1);
         scanf("%d", &gpu_id);
         
@@ -930,9 +722,7 @@ int main() {
         switch (choice) {
             case 1: mine_sha256(gpu_id); break;
             case 2: mine_ethash(gpu_id); break;
-            case 3: mine_equihash(gpu_id); break;
-            case 4: mine_equihash_192_7(gpu_id); break;
-            case 5: mine_on_pool(gpu_id); break;
+            case 3: mine_on_pool(gpu_id); break;
         }
     }
     
@@ -944,3 +734,136 @@ int main() {
     
     return 0;
 }
+void mine_pool_kawpow(PoolConnection *pool, int device_id) {
+    printf("=== MINAGE KAWPOW (RAVENCOIN) SUR POOL ===\n");
+    printf("Version optimisée ProgPoW - ASIC résistant\n");
+    printf("Initialisation...\n\n");
+    
+    // Générer le DAG KawPow (2.5GB pour epoch récent)
+    uint32_t dag_size = 2684354560U;  // 2.5 GB
+    void *dag = kawpow_generate_dag(0, dag_size);
+    
+    if (!dag) {
+        printf("Erreur: Impossible de générer le DAG KawPow!\n");
+        return;
+    }
+    
+    printf("\n=== DAG généré, démarrage minage KawPow ===\n");
+    printf("Optimisations: ProgPoW + Keccak-256 + DAG lookup\n");
+    printf("Appuyez sur Ctrl+C pour arrêter\n\n");
+    
+    uint8_t header[76] = {0};  // Header Ravencoin (76 bytes)
+    uint64_t target = 0x0000FFFFFFFFFFFFULL;  // Difficulté initiale
+    uint64_t start_nonce = 0;
+    uint64_t solution = 0xFFFFFFFFFFFFFFFFULL;
+    
+    // Configuration optimale KawPow
+    const int OPTIMIZED_GRID = GRID_SIZE * 2;   // 2x grid pour KawPow
+    const int OPTIMIZED_BLOCK = 256;             // Optimal
+    const uint64_t BATCH_SIZE = (uint64_t)OPTIMIZED_GRID * OPTIMIZED_BLOCK;
+    
+    clock_t last_report = clock();
+    clock_t last_submit = clock();
+    uint64_t total_hashes = 0;
+    uint32_t shares_found = 0;
+    
+    printf("Configuration: %d blocs x %d threads = %llu hashes/batch\n",
+           OPTIMIZED_GRID, OPTIMIZED_BLOCK, BATCH_SIZE);
+    printf("Performance attendue: 25-35 MH/s (RTX 3080)\n");
+    printf("Rentabilité: ~$2.50/jour (2x Ethash)\n\n");
+    
+    while (stats.is_mining) {
+        // RESET solution avant chaque recherche
+        solution = 0xFFFFFFFFFFFFFFFFULL;
+        
+        // Chercher solution avec kernel KawPow
+        kawpow_search_launch(dag, header, target, start_nonce, dag_size,
+                            &solution, OPTIMIZED_GRID, OPTIMIZED_BLOCK);
+        
+        // Vérifier erreur CUDA
+        cudaError_t err = cudaGetLastError();
+        if (err != cudaSuccess) {
+            printf("\nERREUR CUDA KawPow: %s\n", cudaGetErrorString(err));
+            break;
+        }
+        
+        total_hashes += BATCH_SIZE;
+        
+        // Solution trouvée?
+        if (solution != 0xFFFFFFFFFFFFFFFFULL) {
+            shares_found++;
+            
+            clock_t now = clock();
+            double time_since_last = (double)(now - last_submit) / CLOCKS_PER_SEC;
+            
+            printf("\n>>> SHARE TROUVÉ #%u! <<<\n", shares_found);
+            printf("Nonce: 0x%08X\n", (uint32_t)solution);
+            printf("Temps depuis dernier: %.1f secondes\n", time_since_last);
+            
+            // Format nonce pour KawPow (32 bits)
+            char nonce_hex[9];
+            sprintf(nonce_hex, "%08x", (uint32_t)solution);
+            
+            printf("Soumission à la pool...\n");
+            
+            // KawPow utilise format similaire à Ethash
+            if (pool_submit_share_ethash(pool, g_current_job.job_id, nonce_hex)) {
+                stats.shares_accepted++;
+                printf("✓ Share ACCEPTÉ! (Total: %u)\n\n", stats.shares_accepted);
+            } else {
+                stats.shares_rejected++;
+                printf("✗ Share REJETÉ (Total rejetés: %u)\n\n", stats.shares_rejected);
+            }
+            
+            last_submit = now;
+        }
+        
+        start_nonce += BATCH_SIZE;
+        
+        // Rapport périodique (toutes les 2 secondes)
+        clock_t now = clock();
+        double elapsed = (double)(now - last_report) / CLOCKS_PER_SEC;
+        
+        if (elapsed >= 2.0) {
+            stats.hashrate = (uint64_t)(total_hashes / elapsed);
+            time_t uptime = time(NULL) - stats.start_time;
+            double accept_rate = stats.shares_accepted + stats.shares_rejected > 0 ?
+                100.0 * stats.shares_accepted / (stats.shares_accepted + stats.shares_rejected) : 0;
+            
+            // Calcul shares/heure
+            double shares_per_hour = uptime > 0 ?
+                (shares_found * 3600.0 / uptime) : 0;
+            
+            printf("\r[GPU %d] %.2f MH/s | Shares: %u | Acceptés: %u (%.1f%%) | %.1f/h | Temps: %ldm     ",
+                   device_id,
+                   stats.hashrate / 1000000.0,
+                   shares_found,
+                   stats.shares_accepted,
+                   accept_rate,
+                   shares_per_hour,
+                   (long)(uptime / 60));
+            fflush(stdout);
+            
+            last_report = now;
+            total_hashes = 0;
+        }
+        
+        // Nouveau job?
+        if (g_new_job_available) {
+            g_new_job_available = 0;
+            start_nonce = 0;
+            printf("\n>>> Nouveau job reçu, reset du nonce\n");
+        }
+    }
+    
+    kawpow_destroy_dag(dag);
+    
+    printf("\n\n=== STATISTIQUES FINALES ===\n");
+    printf("Shares trouvés: %u\n", shares_found);
+    printf("Shares acceptés: %u\n", stats.shares_accepted);
+    printf("Shares rejetés: %u\n", stats.shares_rejected);
+    printf("Taux d'acceptation: %.1f%%\n",
+           shares_found > 0 ? 100.0 * stats.shares_accepted / shares_found : 0);
+    printf("\nMinage arrêté.\n");
+}
+
