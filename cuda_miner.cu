@@ -4,6 +4,7 @@
 
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 #include <time.h>
 #include <cuda_runtime.h>
 #include <windows.h>
@@ -11,6 +12,7 @@
 #define MAX_GPUS 8
 #define BLOCK_SIZE 256
 #define GRID_SIZE 8192
+#define KAWPOW_DAG_SIZE 2684354560U  // 2.5GB pour KawPow
 
 // Inclure structures Stratum
 typedef struct {
@@ -34,6 +36,12 @@ typedef struct {
     uint32_t nonce_end;
     uint32_t difficulty;
     time_t received_time;
+    
+    // KawPow specific
+    uint8_t header_hash[32];    // headerHash from pool
+    uint8_t seed_hash[32];      // seedHash for DAG
+    uint8_t target[32];         // target difficulty
+    uint32_t height;            // block height
 } MiningJob;
 
 // Prototypes Stratum (définis dans stratum.c)
@@ -45,10 +53,27 @@ extern "C" {
     int pool_submit_share(PoolConnection *pool, const char *job_id, 
                           const char *extranonce2, const char *ntime, const char *nonce);
     int pool_submit_share_ethash(PoolConnection *pool, const char *job_id, const char *nonce);
+    int pool_submit_share_kawpow(PoolConnection *pool, const char *job_id, const char *nonce,
+                                const char *header_hash, const char *mix_hash);
     int pool_start_listener(PoolConnection *pool, 
                            void (*job_callback)(MiningJob*),
                            void (*diff_callback)(uint32_t));
     void pool_stop_listener(void);
+    
+    // Config reader
+    typedef struct {
+        char pool_url[256];
+        int pool_port;
+        char wallet[256];
+        char worker[64];
+        char username[256];
+        char password[128];
+        int auth_mode;
+    } PoolConfig;
+    
+    int read_pool_config(const char *filename, const char *section, PoolConfig *config);
+    void list_pool_configs(const char *filename);
+    int get_section_name(const char *filename, int index, char *section_out);
 }
 
 // Prototypes fonctions pool locales
@@ -89,8 +114,9 @@ extern "C" {
     void ethash_destroy_dag(void *dag);
     
     void* kawpow_generate_dag(uint32_t epoch, uint32_t dag_size);
-    void kawpow_search_launch(void *dag, const uint8_t *header, uint64_t target,
+    void kawpow_search_launch(void *dag, const uint8_t *header_hash, const uint8_t *target,
                              uint64_t start_nonce, uint32_t dag_size, uint64_t *solution,
+                             uint8_t *mix_hash_out,
                              int grid_size, int block_size);
     void kawpow_destroy_dag(void *dag);
     
@@ -300,6 +326,61 @@ void mine_on_pool(int device_id) {
         return;
     }
     
+    // Menu configuration
+    printf("\nConfiguration Pool:\n");
+    printf("1. Configuration rapide (pool_config.ini)\n");
+    printf("2. Configuration manuelle\n");
+    printf("Choix (1 ou 2): ");
+    scanf("%d", &config_mode);
+    
+    if (config_mode == 1) {
+        // Configuration rapide depuis fichier
+        const char *config_file = "pool_config.ini";
+        
+        printf("\n");
+        list_pool_configs(config_file);
+        printf("\nChoix (numéro): ");
+        
+        int config_index;
+        scanf("%d", &config_index);
+        
+        char section_name[64];
+        if (!get_section_name(config_file, config_index, section_name)) {
+            printf("Configuration invalide!\n");
+            return;
+        }
+        
+        PoolConfig config;
+        if (!read_pool_config(config_file, section_name, &config)) {
+            printf("Erreur lecture configuration!\n");
+            return;
+        }
+        
+        // Copier les valeurs
+        strcpy(pool_url, config.pool_url);
+        pool_port = config.pool_port;
+        
+        if (config.auth_mode == 2 || config.username[0] != '\0') {
+            // Mode username complet
+            strcpy(username, config.username);
+            strcpy(password, config.password);
+        } else {
+            // Mode wallet + worker
+            snprintf(username, sizeof(username), "%s.%s", config.wallet, config.worker);
+            strcpy(password, config.password);
+        }
+        
+        printf("\n=== Configuration chargée ===\n");
+        printf("Section: %s\n", section_name);
+        printf("Pool: %s:%d\n", pool_url, pool_port);
+        printf("Username: %s\n", username);
+        printf("=============================\n\n");
+        
+        // Sauter le reste de la config manuelle
+        goto skip_manual_config;
+    }
+    
+    // Configuration manuelle (code existant)
     // Menu spécial pour Ethash (ETC)
     if (algo_choice == 2) {
         int pool_choice;
@@ -381,6 +462,7 @@ void mine_on_pool(int device_id) {
         }
     }
     
+skip_manual_config:
     const char* algo_names[] = {"", "SHA256", "Ethash (ETC)", "KawPow (RVN)"};
     
     printf("\n=== Configuration ===\n");
@@ -414,16 +496,25 @@ void mine_on_pool(int device_id) {
     }
     
     printf("✓ Connecté et authentifié!\n\n");
+    fflush(stdout);  // Force l'affichage
     
     // Démarrer thread d'écoute pour recevoir jobs
     g_new_job_available = 0;
+    printf("DEBUG: Démarrage du listener...\n");
+    fflush(stdout);
+    
     if (!pool_start_listener(&pool, on_new_job, on_difficulty_change)) {
         printf("Échec démarrage listener!\n");
+        fflush(stdout);
         pool_disconnect(&pool);
         return;
     }
     
+    printf("DEBUG: Listener démarré, attente job...\n");
+    fflush(stdout);
+    
     printf("En attente du premier job de la pool...\n");
+    fflush(stdout);
     
     // Attendre premier job (max 30 secondes)
     int wait_count = 0;
@@ -736,11 +827,11 @@ int main() {
 }
 void mine_pool_kawpow(PoolConnection *pool, int device_id) {
     printf("=== MINAGE KAWPOW (RAVENCOIN) SUR POOL ===\n");
-    printf("Version optimisée ProgPoW - ASIC résistant\n");
+    printf("Version CORRECTE - Utilise headerHash de la pool\n");
     printf("Initialisation...\n\n");
     
-    // Générer le DAG KawPow (2.5GB pour epoch récent)
-    uint32_t dag_size = 2684354560U;  // 2.5 GB
+    // Générer le DAG KawPow (2.5GB)
+    uint32_t dag_size = KAWPOW_DAG_SIZE;
     void *dag = kawpow_generate_dag(0, dag_size);
     
     if (!dag) {
@@ -749,17 +840,16 @@ void mine_pool_kawpow(PoolConnection *pool, int device_id) {
     }
     
     printf("\n=== DAG généré, démarrage minage KawPow ===\n");
-    printf("Optimisations: ProgPoW + Keccak-256 + DAG lookup\n");
+    printf("Format: worker + job_id + nonce + header_hash + mix_hash\n");
     printf("Appuyez sur Ctrl+C pour arrêter\n\n");
     
-    uint8_t header[76] = {0};  // Header Ravencoin (76 bytes)
-    uint64_t target = 0x0000FFFFFFFFFFFFULL;  // Difficulté initiale
     uint64_t start_nonce = 0;
     uint64_t solution = 0xFFFFFFFFFFFFFFFFULL;
+    uint8_t mix_hash[32] = {0};
     
-    // Configuration optimale KawPow
-    const int OPTIMIZED_GRID = GRID_SIZE * 2;   // 2x grid pour KawPow
-    const int OPTIMIZED_BLOCK = 256;             // Optimal
+    // Configuration optimale
+    const int OPTIMIZED_GRID = GRID_SIZE * 8;   // 65536 blocs
+    const int OPTIMIZED_BLOCK = 256;
     const uint64_t BATCH_SIZE = (uint64_t)OPTIMIZED_GRID * OPTIMIZED_BLOCK;
     
     clock_t last_report = clock();
@@ -769,16 +859,22 @@ void mine_pool_kawpow(PoolConnection *pool, int device_id) {
     
     printf("Configuration: %d blocs x %d threads = %llu hashes/batch\n",
            OPTIMIZED_GRID, OPTIMIZED_BLOCK, BATCH_SIZE);
-    printf("Performance attendue: 25-35 MH/s (RTX 3080)\n");
-    printf("Rentabilité: ~$2.50/jour (2x Ethash)\n\n");
+    printf("Performance attendue GTX 1660: 10-12 MH/s\n\n");
     
     while (stats.is_mining) {
-        // RESET solution avant chaque recherche
+        // Vérifier que nous avons un job valide
+        if (g_current_job.job_id[0] == '\0') {
+            Sleep(100);
+            continue;
+        }
+        
+        // RESET solution avant recherche
         solution = 0xFFFFFFFFFFFFFFFFULL;
         
-        // Chercher solution avec kernel KawPow
-        kawpow_search_launch(dag, header, target, start_nonce, dag_size,
-                            &solution, OPTIMIZED_GRID, OPTIMIZED_BLOCK);
+        // Utiliser headerHash et target DU JOB !
+        kawpow_search_launch(dag, g_current_job.header_hash, g_current_job.target,
+                            start_nonce, dag_size, &solution, mix_hash,
+                            OPTIMIZED_GRID, OPTIMIZED_BLOCK);
         
         // Vérifier erreur CUDA
         cudaError_t err = cudaGetLastError();
@@ -800,14 +896,28 @@ void mine_pool_kawpow(PoolConnection *pool, int device_id) {
             printf("Nonce: 0x%08X\n", (uint32_t)solution);
             printf("Temps depuis dernier: %.1f secondes\n", time_since_last);
             
-            // Format nonce pour KawPow (32 bits)
+            // Convertir en hex strings
             char nonce_hex[9];
+            char header_hash_hex[65];
+            char mix_hash_hex[65];
+            
             sprintf(nonce_hex, "%08x", (uint32_t)solution);
             
-            printf("Soumission à la pool...\n");
+            // UTILISER le headerHash du job (pas généré!)
+            for (int i = 0; i < 32; i++) {
+                sprintf(&header_hash_hex[i*2], "%02x", g_current_job.header_hash[i]);
+                sprintf(&mix_hash_hex[i*2], "%02x", mix_hash[i]);
+            }
+            header_hash_hex[64] = '\0';
+            mix_hash_hex[64] = '\0';
             
-            // KawPow utilise format similaire à Ethash
-            if (pool_submit_share_ethash(pool, g_current_job.job_id, nonce_hex)) {
+            printf("Header hash (from pool): 0x%s\n", header_hash_hex);
+            printf("Mix hash (calculated): 0x%s\n", mix_hash_hex);
+            printf("Soumission à la pool (5 params)...\n");
+            
+            // Soumettre avec 5 paramètres
+            if (pool_submit_share_kawpow(pool, g_current_job.job_id, nonce_hex,
+                                        header_hash_hex, mix_hash_hex)) {
                 stats.shares_accepted++;
                 printf("✓ Share ACCEPTÉ! (Total: %u)\n\n", stats.shares_accepted);
             } else {
@@ -830,7 +940,6 @@ void mine_pool_kawpow(PoolConnection *pool, int device_id) {
             double accept_rate = stats.shares_accepted + stats.shares_rejected > 0 ?
                 100.0 * stats.shares_accepted / (stats.shares_accepted + stats.shares_rejected) : 0;
             
-            // Calcul shares/heure
             double shares_per_hour = uptime > 0 ?
                 (shares_found * 3600.0 / uptime) : 0;
             

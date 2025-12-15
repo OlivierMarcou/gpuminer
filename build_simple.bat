@@ -67,6 +67,16 @@ if %ERRORLEVEL% NEQ 0 (
 echo OK
 echo.
 
+echo Compilation config reader...
+nvcc -O3 -c config_reader.c -o config_reader.obj
+if %ERRORLEVEL% NEQ 0 (
+    echo ERREUR compilation config_reader!
+    pause
+    exit /b 1
+)
+echo OK
+echo.
+
 echo Compilation programme principal...
 nvcc -O3 -arch=sm_50 -c cuda_miner.cu -o cuda_miner.obj
 if %ERRORLEVEL% NEQ 0 (
@@ -78,7 +88,7 @@ echo OK
 echo.
 
 echo [3/3] Linkage final...
-nvcc -O3 -o cuda_miner.exe cuda_miner.obj sha256.obj ethash.obj kawpow.obj stratum.obj cJSON.obj -lws2_32
+nvcc -O3 -o cuda_miner.exe cuda_miner.obj sha256.obj ethash.obj kawpow.obj stratum.obj cJSON.obj config_reader.obj -lws2_32
 if %ERRORLEVEL% NEQ 0 (
     echo ERREUR linkage!
     pause

@@ -56,6 +56,12 @@ typedef struct MiningJob {
     uint32_t nonce_end;
     uint32_t difficulty;
     time_t received_time;
+    
+    // KawPow specific
+    uint8_t header_hash[32];    // headerHash from pool
+    uint8_t seed_hash[32];      // seedHash for DAG
+    uint8_t target[32];         // target difficulty
+    uint32_t height;            // block height
 } MiningJob;
 
 static WSADATA wsa_data;
@@ -465,6 +471,77 @@ int pool_submit_share_ethash(PoolConnection *pool, const char *job_id, const cha
     
     return accepted;
 }
+// Fonction KawPow (5 paramètres)
+int pool_submit_share_kawpow(PoolConnection *pool, const char *job_id, const char *nonce,
+                             const char *header_hash, const char *mix_hash) {
+    static int submit_id = 100;
+    char json[2048];
+    
+    // Format KawPow: 5 paramètres avec 0x prefix
+    snprintf(json, sizeof(json),
+        "{\"id\":%d,\"method\":\"mining.submit\",\"params\":[\"%s\",\"%s\",\"0x%s\",\"0x%s\",\"0x%s\"]}",
+        submit_id++,
+        pool->username,
+        job_id,
+        nonce,
+        header_hash,
+        mix_hash);
+    
+    printf(">>> %s\n", json);
+    
+    if (!send_json(pool->socket, json)) {
+        printf("Erreur envoi share!\n");
+        return 0;
+    }
+    
+    char buffer[4096];
+    int len = pool_receive_message(pool, buffer, sizeof(buffer));
+    if (len <= 0) {
+        printf("Pas de réponse pool\n");
+        return 0;
+    }
+    
+    int accepted = 0;
+    int found_result = 0;
+    char *line_start = buffer;
+    char *line_end;
+    char line[4096];
+    
+    while ((line_end = strchr(line_start, '\n')) != NULL) {
+        int line_len = line_end - line_start;
+        if (line_len >= sizeof(line)) line_len = sizeof(line) - 1;
+        memcpy(line, line_start, line_len);
+        line[line_len] = '\0';
+        
+        if (line_len > 2) {
+            printf("<<< %s\n", line);
+            
+            if (strstr(line, "\"result\"") && !found_result) {
+                cJSON *root = cJSON_Parse(line);
+                if (root) {
+                    cJSON *result = cJSON_GetObjectItem(root, "result");
+                    cJSON *error = cJSON_GetObjectItem(root, "error");
+                    
+                    if (cJSON_IsTrue(result)) {
+                        accepted = 1;
+                    } else if (error && !cJSON_IsNull(error)) {
+                        cJSON *message = cJSON_GetObjectItem(error, "message");
+                        if (message && cJSON_IsString(message)) {
+                            printf("Erreur pool: %s\n", cJSON_GetStringValue(message));
+                        }
+                    }
+                    
+                    cJSON_Delete(root);
+                    found_result = 1;
+                }
+            }
+        }
+        
+        line_start = line_end + 1;
+    }
+    
+    return accepted;
+}
 
 
 void pool_parse_notify(PoolConnection *pool, const char *json, MiningJob *job) {
@@ -486,11 +563,73 @@ void pool_parse_notify(PoolConnection *pool, const char *json, MiningJob *job) {
         printf("DEBUG: Stored in job->job_id: '%s'\n", job->job_id);
     }
     
-    // Détecter format Zcash vs Bitcoin
+    // Détecter format: Zcash vs Bitcoin vs KawPow
     int array_size = cJSON_GetArraySize(params);
-    int is_zcash = (array_size >= 9);  // Zcash a 10 params, Bitcoin a 8
+    int is_zcash = (array_size >= 9);  // Zcash a 10 params
+    int is_kawpow = (array_size == 7); // KawPow a 7 params
     
-    if (is_zcash) {
+    if (is_kawpow) {
+        // Format KawPow/Ravencoin
+        // params: [job_id, headerHash, seedHash, target, clean, height, ntime]
+        printf("DEBUG: Format KawPow détecté (%d params)\n", array_size);
+        
+        // headerHash (32 bytes hex) - params[1]
+        cJSON *header_hash = cJSON_GetArrayItem(params, 1);
+        if (cJSON_IsString(header_hash)) {
+            const char *hh_str = cJSON_GetStringValue(header_hash);
+            // Convertir hex string en bytes
+            for (int i = 0; i < 32 && i*2 < (int)strlen(hh_str); i++) {
+                unsigned int temp;
+                sscanf(&hh_str[i*2], "%2x", &temp);
+                job->header_hash[i] = (uint8_t)temp;
+            }
+            printf("DEBUG: headerHash: %s\n", hh_str);
+        }
+        
+        // seedHash (32 bytes hex) - params[2]
+        cJSON *seed_hash = cJSON_GetArrayItem(params, 2);
+        if (cJSON_IsString(seed_hash)) {
+            const char *sh_str = cJSON_GetStringValue(seed_hash);
+            for (int i = 0; i < 32 && i*2 < (int)strlen(sh_str); i++) {
+                unsigned int temp;
+                sscanf(&sh_str[i*2], "%2x", &temp);
+                job->seed_hash[i] = (uint8_t)temp;
+            }
+            printf("DEBUG: seedHash: %s\n", sh_str);
+        }
+        
+        // target (32 bytes hex) - params[3]
+        cJSON *target = cJSON_GetArrayItem(params, 3);
+        if (cJSON_IsString(target)) {
+            const char *t_str = cJSON_GetStringValue(target);
+            for (int i = 0; i < 32 && i*2 < (int)strlen(t_str); i++) {
+                unsigned int temp;
+                sscanf(&t_str[i*2], "%2x", &temp);
+                job->target[i] = (uint8_t)temp;
+            }
+            printf("DEBUG: target: %s\n", t_str);
+        }
+        
+        // height - params[5]
+        cJSON *height_json = cJSON_GetArrayItem(params, 5);
+        if (cJSON_IsNumber(height_json)) {
+            job->height = (uint32_t)cJSON_GetNumberValue(height_json);
+            printf("DEBUG: height: %u\n", job->height);
+        }
+
+        
+        // ntime - params[6]
+        cJSON *ntime = cJSON_GetArrayItem(params, 6);
+        if (cJSON_IsString(ntime)) {
+            const char *ntime_str = cJSON_GetStringValue(ntime);
+            strncpy(pool->ntime, ntime_str, sizeof(pool->ntime) - 1);
+            pool->ntime[sizeof(pool->ntime) - 1] = '\0';
+            strncpy(job->ntime, ntime_str, sizeof(job->ntime) - 1);
+            job->ntime[sizeof(job->ntime) - 1] = '\0';
+            printf("DEBUG: ntime: %s\n", ntime_str);
+        }
+        
+    } else if (is_zcash) {
         // Format Zcash/Equihash
         // params: [job_id, version, prevhash, merkleroot, reserved, nbits, ntime, clean, algo, personal]
         printf("DEBUG: Format Zcash détecté (%d params)\n", array_size);
@@ -593,11 +732,21 @@ static void parse_set_difficulty(PoolConnection *pool, const char *json) {
 }
 
 static unsigned __stdcall listen_thread_func(void *data) {
+    printf("DEBUG: Thread listener DÉMARRÉ!\n");
+    fflush(stdout);
+    
     ListenThreadData *thread_data = (ListenThreadData*)data;
     PoolConnection *pool = thread_data->pool;
     
+    printf("DEBUG: Pool status = %d\n", pool->status);
+    printf("DEBUG: keep_listening = %d\n", keep_listening);
+    fflush(stdout);
+    
     char buffer[8192];
     char line[8192];
+    
+    printf("DEBUG: Entrée dans boucle d'écoute...\n");
+    fflush(stdout);
     
     while (keep_listening && pool->status == POOL_AUTHORIZED) {
         int len = pool_receive_message(pool, buffer, sizeof(buffer));
@@ -706,14 +855,23 @@ int pool_start_listener(PoolConnection *pool,
     data->diff_callback = diff_callback;
     
     keep_listening = 1;
+    printf("DEBUG: Création thread...\n");
+    fflush(stdout);
+    
     listen_thread = (HANDLE)_beginthreadex(NULL, 0, listen_thread_func, data, 0, NULL);
     
+    printf("DEBUG: Thread handle = %p\n", listen_thread);
+    fflush(stdout);
+    
     if (!listen_thread) {
+        printf("ERREUR: Échec création thread!\n");
+        fflush(stdout);
         free(data);
         return 0;
     }
     
     printf("Thread d'écoute démarré\n");
+    fflush(stdout);
     return 1;
 }
 
@@ -732,4 +890,3 @@ void cleanup_winsock() {
         wsa_initialized = 0;
     }
 }
-
