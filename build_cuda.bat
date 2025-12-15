@@ -28,14 +28,45 @@ echo.
 
 REM Vérifier Visual Studio (cl.exe)
 echo [2/4] Verification de Visual Studio...
-REM Chercher vcvarsall.bat
-set "VCVARS=C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Auxiliary\Build\vcvarsall.bat"
+where cl >nul 2>&1
+if %ERRORLEVEL% NEQ 0 (
+    echo ATTENTION: cl.exe non trouve dans le PATH
+    echo Recherche de Visual Studio...
+    
+    REM Chercher vcvarsall.bat
+    set "VCVARS="
+    
+    if exist "C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Auxiliary\Build\vcvarsall.bat" (
+        set "VCVARS=C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Auxiliary\Build\vcvarsall.bat"
+    )
+    if exist "C:\Program Files\Microsoft Visual Studio\2022\Professional\VC\Auxiliary\Build\vcvarsall.bat" (
+        set "VCVARS=C:\Program Files\Microsoft Visual Studio\2022\Professional\VC\Auxiliary\Build\vcvarsall.bat"
+    )
+    if exist "C:\Program Files (x86)\Microsoft Visual Studio\2019\Community\VC\Auxiliary\Build\vcvarsall.bat" (
+        set "VCVARS=C:\Program Files (x86)\Microsoft Visual Studio\2019\Community\VC\Auxiliary\Build\vcvarsall.bat"
+    )
+    
+    if defined VCVARS (
+        echo Visual Studio trouve: %VCVARS%
+        echo Configuration de l'environnement...
+        call "%VCVARS%" x64
+        echo.
+    ) else (
+        echo ERREUR: Visual Studio non trouve!
+        echo.
+        echo Installez Visual Studio Community (gratuit):
+        echo https://visualstudio.microsoft.com/downloads/
+        echo.
+        echo Cochez: "Developpement Desktop avec C++"
+        echo.
+        pause
+        exit /b 1
+    )
+) else (
+    echo OK: Visual Studio detecte
+    echo.
+)
 
-
-echo Visual Studio trouve: %VCVARS%
-echo Configuration de l'environnement...
-call "%VCVARS%" x64
-echo.
 REM Nettoyer les anciens fichiers
 echo [3/4] Nettoyage...
 if exist *.obj del /Q *.obj
@@ -191,7 +222,7 @@ echo.
 
 REM Afficher infos sur le binaire
 if exist cuda_miner.exe (
-    echo Taille: 
+    echo Taille du fichier:
     dir cuda_miner.exe | find "cuda_miner.exe"
     echo.
 )
