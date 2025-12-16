@@ -113,10 +113,10 @@ extern "C" {
                              int grid_size, int block_size);
     void ethash_destroy_dag(void *dag);
     
-    void* kawpow_generate_dag(uint32_t epoch, uint32_t dag_size);
+    void* kawpow_generate_dag(const uint8_t *seed_hash, uint32_t dag_size);
     void kawpow_search_launch(void *dag, const uint8_t *header_hash, const uint8_t *target,
-                             uint64_t start_nonce, uint32_t dag_size, uint64_t *solution,
-                             uint8_t *mix_hash_out,
+                             uint64_t start_nonce, uint32_t dag_size, uint32_t prog_seed,
+                             uint64_t *solution, uint8_t *mix_hash_out,
                              int grid_size, int block_size);
     void kawpow_destroy_dag(void *dag);
     
@@ -827,19 +827,15 @@ int main() {
 }
 void mine_pool_kawpow(PoolConnection *pool, int device_id) {
     printf("=== MINAGE KAWPOW (RAVENCOIN) SUR POOL ===\n");
-    printf("Version CORRECTE - Utilise headerHash de la pool\n");
+    printf("Version FINALE - DAG depuis seedHash + prog_seed\n");
     printf("Initialisation...\n\n");
     
-    // Générer le DAG KawPow (2.5GB)
+    // DAG sera généré au premier job
+    void *dag = NULL;
+    uint8_t current_seed_hash[32] = {0};
     uint32_t dag_size = KAWPOW_DAG_SIZE;
-    void *dag = kawpow_generate_dag(0, dag_size);
     
-    if (!dag) {
-        printf("Erreur: Impossible de générer le DAG KawPow!\n");
-        return;
-    }
-    
-    printf("\n=== DAG généré, démarrage minage KawPow ===\n");
+    printf("\n=== En attente du premier job pour générer le DAG ===\n");
     printf("Format: worker + job_id + nonce + header_hash + mix_hash\n");
     printf("Appuyez sur Ctrl+C pour arrêter\n\n");
     
@@ -868,12 +864,48 @@ void mine_pool_kawpow(PoolConnection *pool, int device_id) {
             continue;
         }
         
+        // Vérifier si on doit (re)générer le DAG
+        int need_regenerate = 0;
+        if (dag == NULL) {
+            need_regenerate = 1;
+        } else {
+            // Vérifier si seedHash a changé
+            for (int i = 0; i < 32; i++) {
+                if (current_seed_hash[i] != g_current_job.seed_hash[i]) {
+                    need_regenerate = 1;
+                    break;
+                }
+            }
+        }
+        
+        if (need_regenerate) {
+            if (dag) {
+                kawpow_destroy_dag(dag);
+            }
+            
+            printf("\n=== Génération DAG depuis seedHash ===\n");
+            printf("Height: %u\n", g_current_job.height);
+            
+            dag = kawpow_generate_dag(g_current_job.seed_hash, dag_size);
+            
+            if (!dag) {
+                printf("ERREUR: Impossible de générer le DAG!\n");
+                break;
+            }
+            
+            memcpy(current_seed_hash, g_current_job.seed_hash, 32);
+            printf("=== DAG prêt, démarrage minage ===\n\n");
+        }
+        
+        // Calculer prog_seed depuis block height
+        uint32_t prog_seed = g_current_job.height / 10;  // PROGPOW_PERIOD = 10
+        
         // RESET solution avant recherche
         solution = 0xFFFFFFFFFFFFFFFFULL;
         
-        // Utiliser headerHash et target DU JOB !
+        // Utiliser headerHash, target ET prog_seed !
         kawpow_search_launch(dag, g_current_job.header_hash, g_current_job.target,
-                            start_nonce, dag_size, &solution, mix_hash,
+                            start_nonce, dag_size, prog_seed, &solution, mix_hash,
                             OPTIMIZED_GRID, OPTIMIZED_BLOCK);
         
         // Vérifier erreur CUDA
@@ -975,4 +1007,3 @@ void mine_pool_kawpow(PoolConnection *pool, int device_id) {
            shares_found > 0 ? 100.0 * stats.shares_accepted / shares_found : 0);
     printf("\nMinage arrêté.\n");
 }
-

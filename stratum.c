@@ -616,7 +616,6 @@ void pool_parse_notify(PoolConnection *pool, const char *json, MiningJob *job) {
             job->height = (uint32_t)cJSON_GetNumberValue(height_json);
             printf("DEBUG: height: %u\n", job->height);
         }
-
         
         // ntime - params[6]
         cJSON *ntime = cJSON_GetArrayItem(params, 6);
@@ -890,3 +889,4 @@ void cleanup_winsock() {
         wsa_initialized = 0;
     }
 }
+
