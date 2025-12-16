@@ -17,10 +17,9 @@
 // Inclure structures Stratum
 typedef struct {
     SOCKET socket;
-    int status;  // PoolStatus
+    int status;
     char server_ip[64];
     int server_port;
-    char username[256];  // IMPORTANT: doit correspondre à stratum.c !
     char job_id[128];
     char extranonce1[32];
     int extranonce2_size;
@@ -75,17 +74,6 @@ extern "C" {
     int read_pool_config(const char *filename, const char *section, PoolConfig *config);
     void list_pool_configs(const char *filename);
     int get_section_name(const char *filename, int index, char *section_out);
-}
-
-// Helper: convertir extranonce hex string en uint64_t
-static uint64_t extranonce_to_uint64(const char *extranonce_hex) {
-    if (!extranonce_hex || extranonce_hex[0] == '\0') {
-        return 0;
-    }
-    
-    uint64_t value = 0;
-    sscanf(extranonce_hex, "%llx", &value);
-    return value;
 }
 
 // Prototypes fonctions pool locales
@@ -851,15 +839,7 @@ void mine_pool_kawpow(PoolConnection *pool, int device_id) {
     printf("Format: worker + job_id + nonce + header_hash + mix_hash\n");
     printf("Appuyez sur Ctrl+C pour arrêter\n\n");
     
-    // Initialiser start_nonce avec extranonce1 de la pool
-    // Nonce = [extranonce1 (32 bits hauts)] [extranonce2 (32 bits bas)]
-    uint64_t extranonce1_value = extranonce_to_uint64(pool->extranonce1);
-    uint64_t start_nonce = (extranonce1_value << 32);  // extranonce1 dans les bits 32-63
-    uint32_t extranonce2 = 0;  // extranonce2 commence à 0
-    
-    printf("Extranonce1 from pool: %s (0x%llX)\n", pool->extranonce1, extranonce1_value);
-    printf("Start nonce: 0x%016llX\n\n", start_nonce);
-    
+    uint64_t start_nonce = 0;
     uint64_t solution = 0xFFFFFFFFFFFFFFFFULL;
     uint8_t mix_hash[32] = {0};
     
@@ -946,31 +926,15 @@ void mine_pool_kawpow(PoolConnection *pool, int device_id) {
             double time_since_last = (double)(now - last_submit) / CLOCKS_PER_SEC;
             
             printf("\n>>> SHARE TROUVÉ #%u! <<<\n", shares_found);
-            printf("Nonce: 0x%016llX\n", solution);
+            printf("Nonce: 0x%08X\n", (uint32_t)solution);
             printf("Temps depuis dernier: %.1f secondes\n", time_since_last);
             
             // Convertir en hex strings
-            char nonce_hex[17];  // 8 bytes = 16 hex chars + null
+            char nonce_hex[9];
             char header_hash_hex[65];
             char mix_hash_hex[65];
             
-            // Format nonce en LITTLE-ENDIAN (requis par KawPow/Stratum)
-            // Convertir uint64_t en bytes little-endian
-            uint8_t nonce_bytes[8];
-            nonce_bytes[0] = (solution >> 0) & 0xFF;
-            nonce_bytes[1] = (solution >> 8) & 0xFF;
-            nonce_bytes[2] = (solution >> 16) & 0xFF;
-            nonce_bytes[3] = (solution >> 24) & 0xFF;
-            nonce_bytes[4] = (solution >> 32) & 0xFF;
-            nonce_bytes[5] = (solution >> 40) & 0xFF;
-            nonce_bytes[6] = (solution >> 48) & 0xFF;
-            nonce_bytes[7] = (solution >> 56) & 0xFF;
-            
-            // Convertir en hex string
-            for (int i = 0; i < 8; i++) {
-                sprintf(&nonce_hex[i*2], "%02x", nonce_bytes[i]);
-            }
-            nonce_hex[16] = '\0';
+            sprintf(nonce_hex, "%08x", (uint32_t)solution);
             
             // UTILISER le headerHash du job (pas généré!)
             for (int i = 0; i < 32; i++) {
@@ -997,9 +961,7 @@ void mine_pool_kawpow(PoolConnection *pool, int device_id) {
             last_submit = now;
         }
         
-        // Incrémenter extranonce2 (32 bits bas seulement)
-        extranonce2 += (uint32_t)BATCH_SIZE;
-        start_nonce = (extranonce1_value << 32) | extranonce2;
+        start_nonce += BATCH_SIZE;
         
         // Rapport périodique (toutes les 2 secondes)
         clock_t now = clock();
@@ -1031,8 +993,7 @@ void mine_pool_kawpow(PoolConnection *pool, int device_id) {
         // Nouveau job?
         if (g_new_job_available) {
             g_new_job_available = 0;
-            extranonce2 = 0;  // Reset extranonce2, garder extranonce1
-            start_nonce = (extranonce1_value << 32) | extranonce2;
+            start_nonce = 0;
             printf("\n>>> Nouveau job reçu, reset du nonce\n");
         }
     }
@@ -1047,3 +1008,5 @@ void mine_pool_kawpow(PoolConnection *pool, int device_id) {
            shares_found > 0 ? 100.0 * stats.shares_accepted / shares_found : 0);
     printf("\nMinage arrêté.\n");
 }
+}
+

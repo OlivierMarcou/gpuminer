@@ -191,13 +191,10 @@ __global__ void kawpow_search_kernel_final(
     uint32_t gid = blockIdx.x * blockDim.x + threadIdx.x;
     uint64_t nonce = start_nonce + gid;
     
-    // Initialize mix from header (byte par byte pour éviter alignement)
+    // Initialize mix from header
     uint32_t mix[PROGPOW_REGS];
     for (int i = 0; i < 8; i++) {
-        mix[i] = ((uint32_t)g_header_hash[i*4+0] << 0) |
-                 ((uint32_t)g_header_hash[i*4+1] << 8) |
-                 ((uint32_t)g_header_hash[i*4+2] << 16) |
-                 ((uint32_t)g_header_hash[i*4+3] << 24);
+        mix[i] = ((uint32_t*)g_header_hash)[i];
     }
     
     // Initialize remaining registers with nonce
@@ -208,9 +205,7 @@ __global__ void kawpow_search_kernel_final(
     mix[1] = fnv1a(mix[1], (uint32_t)(nonce >> 32));
     
     // ProgPoW: 64 rounds
-    // DAG: tableau de uint64_t
-    // dag_words = nombre total de uint64_t dans le DAG
-    uint32_t dag_words = dag_size / 8;  // Nombre de uint64_t
+    uint32_t dag_words = dag_size / 8;
     
     for (int i = 0; i < PROGPOW_CNT_DAG; i++) {
         progpow_loop(mix, g_dag, dag_words, i, prog_seed);

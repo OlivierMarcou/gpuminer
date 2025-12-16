@@ -477,9 +477,9 @@ int pool_submit_share_kawpow(PoolConnection *pool, const char *job_id, const cha
     static int submit_id = 100;
     char json[2048];
     
-    // Format KawPow: 5 paramètres avec 0x prefix
+    // Format KawPow: 5 paramètres SANS 0x prefix
     snprintf(json, sizeof(json),
-        "{\"id\":%d,\"method\":\"mining.submit\",\"params\":[\"%s\",\"%s\",\"0x%s\",\"0x%s\",\"0x%s\"]}",
+        "{\"id\":%d,\"method\":\"mining.submit\",\"params\":[\"%s\",\"%s\",\"%s\",\"%s\",\"%s\"]}",
         submit_id++,
         pool->username,
         job_id,
